@@ -3,8 +3,8 @@ import shutil
 import chainlit as cl
 from chainlit.action import Action
 from openai import OpenAI
-from database import Database
-from document_processor import DocumentProcessor
+from assistant.database import Database
+from assistant.document_processor import DocumentProcessor
 
 db = Database()
 processor = DocumentProcessor(db)

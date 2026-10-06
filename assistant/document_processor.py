@@ -3,9 +3,9 @@ import hashlib
 from pathlib import Path
 from markitdown import MarkItDown
 
-# Percorso fisso e pulito: punta direttamente a app/data/italia
+# Puntiamo alla cartella data/italia alla radice del progetto (salendo di un livello da app/)
 CURRENT_DIR = Path(__file__).resolve().parent
-ITALIA_DIR = CURRENT_DIR / "data" / "italia"
+ITALIA_DIR = CURRENT_DIR.parent / "data" / "italia"
 
 def calculate_file_hash(file_path: Path) -> str:
     """Calcola l'hash SHA-256 del contenuto del file per tracciarne le modifiche."""
@@ -29,14 +29,13 @@ class DocumentProcessor:
         }
 
     def sync_documents(self):
-        """Sincronizza la cartella app/data/italia/ con ChromaDB."""
+        """Sincronizza la cartella data/italia/ con ChromaDB."""
         print(f"\n[DEBUG] Controllo cartella italia in corso...")
         print(f"[DEBUG] Percorso assoluto cercato: {ITALIA_DIR.resolve()}")
         
         if not ITALIA_DIR.exists():
             print(f"[DEBUG] La cartella non esiste. La creo adesso...")
             ITALIA_DIR.mkdir(parents=True, exist_ok=True)
-            print(f"[DEBUG] Cartella creata. Inserisci i file .txt al suo interno.")
             return
 
         supported_extensions = {".txt", ".pdf", ".docx", ".pptx", ".xlsx"}
@@ -94,7 +93,6 @@ class DocumentProcessor:
                 result = self.md_converter.convert(str(file_path))
                 content = result.text_content
 
-            # Chunking semplice ed efficiente
             chunk_size = 1000
             chunks = [content[i:i+chunk_size] for i in range(0, len(content), chunk_size)]
             print(f"[DEBUG] File '{filename}' suddiviso in {len(chunks)} chunk.")
