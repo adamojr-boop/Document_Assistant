@@ -1,0 +1,2 @@
+[opentelemetry_instrumentor]
+chromadb = opentelemetry.instrumentation.chromadb:ChromaInstrumentor

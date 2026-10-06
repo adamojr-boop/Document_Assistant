@@ -1,0 +1,881 @@
+import json
+import os
+import site
+import sys
+from importlib import util
+from pathlib import Path
+from typing import (
+    TYPE_CHECKING,
+    Annotated,
+    Any,
+    Awaitable,
+    Callable,
+    Dict,
+    List,
+    Literal,
+    Optional,
+    Union,
+)
+
+import tomli
+from pydantic import BaseModel, Field, model_validator
+from pydantic_settings import BaseSettings
+from starlette.datastructures import Headers
+
+from chainlit.data.base import BaseDataLayer
+from chainlit.logger import logger
+from chainlit.translations import lint_translation_json
+from chainlit.version import __version__
+
+from ._utils import is_path_inside
+
+if TYPE_CHECKING:
+    from fastapi import Request, Response
+
+    from chainlit.action import Action
+    from chainlit.message import Message
+    from chainlit.types import (
+        ChatProfile,
+        Feedback,
+        InputAudioChunk,
+        Starter,
+        StarterCategory,
+        ThreadDict,
+    )
+    from chainlit.user import User
+else:
+    # Pydantic needs to resolve forward annotations. Because all of these are used
+    # within `typing.Callable`, alias to `Any` as Pydantic does not perform validation
+    # of callable argument/return types anyway.
+    Request = Response = Action = Message = ChatProfile = InputAudioChunk = Starter = StarterCategory = ThreadDict = User = Feedback = Any  # fmt: off
+
+BACKEND_ROOT = os.path.dirname(__file__)
+PACKAGE_ROOT = os.path.dirname(os.path.dirname(BACKEND_ROOT))
+TRANSLATIONS_DIR = os.path.join(BACKEND_ROOT, "translations")
+
+
+# Get the directory the script is running from
+APP_ROOT = os.getenv("CHAINLIT_APP_ROOT", os.getcwd())
+
+# Create the directory to store the uploaded files
+FILES_DIRECTORY = Path(APP_ROOT) / ".files"
+FILES_DIRECTORY.mkdir(exist_ok=True)
+
+config_dir = os.path.join(APP_ROOT, ".chainlit")
+public_dir = os.path.join(APP_ROOT, "public")
+config_file = os.path.join(config_dir, "config.toml")
+config_translation_dir = os.path.join(config_dir, "translations")
+
+# Default config file created if none exists
+DEFAULT_CONFIG_STR = f"""[project]
+# List of environment variables to be provided by each user to use the app.
+user_env = []
+
+# Duration (in seconds) during which the session is saved when the connection is lost
+session_timeout = 3600
+
+# Duration (in seconds) of the user session expiry
+user_session_timeout = 1296000  # 15 days
+
+# Enable third parties caching (e.g., LangChain cache)
+cache = false
+
+# Whether to persist user environment variables (API keys) to the database
+# Set to true to store user env vars in DB, false to exclude them for security
+persist_user_env = false
+
+# Whether to mask user environment variables (API keys) in the UI with password type
+# Set to true to show API keys as ***, false to show them as plain text
+mask_user_env = false
+
+# Authorized origins
+allow_origins = ["*"]
+
+[features]
+# Process and display HTML in messages. This can be a security risk (see https://stackoverflow.com/questions/19603097/why-is-it-dangerous-to-render-user-generated-html-or-javascript)
+unsafe_allow_html = false
+
+# Process and display mathematical expressions. This can clash with "$" characters in messages.
+latex = false
+
+# Enable rendering of user messages markdown
+user_message_markdown = true
+
+# Autoscroll new user messages at the top of the window
+user_message_autoscroll = true
+
+# Autoscroll new assistant messages
+assistant_message_autoscroll = true
+
+# Automatically tag threads with the current chat profile (if a chat profile is used)
+auto_tag_thread = true
+
+# Allow users to edit their own messages
+edit_message = true
+
+# Allow users to share threads (backend + UI). Requires an app-defined on_shared_thread_view callback.
+allow_thread_sharing = false
+
+# Enable favorite messages
+favorites = false
+
+[features.slack]
+# Add emoji reaction when message is received (requires reactions:write OAuth scope)
+reaction_on_message_received = false
+
+# Authorize users to spontaneously upload files with messages
+[features.spontaneous_file_upload]
+    enabled = true
+    # Define accepted file types using MIME types
+    # Examples:
+    # 1. For specific file types:
+    #    accept = ["image/jpeg", "image/png", "application/pdf"]
+    # 2. For all files of certain type:
+    #    accept = ["image/*", "audio/*", "video/*"]
+    # 3. For specific file extensions:
+    #    accept = {{ "application/octet-stream" = [".xyz", ".pdb"] }}
+    # Note: Using "*/*" is not recommended as it may cause browser warnings
+    accept = ["*/*"]
+    max_files = 20
+    max_size_mb = 500
+
+[features.audio]
+    # Enable audio features
+    enabled = false
+    # Sample rate of the audio
+    sample_rate = 24000
+
+[features.mcp]
+    # Enable Model Context Protocol (MCP) features
+    enabled = false
+
+    # Developer-configured MCP servers. Users can connect them by name.
+    # Supported types: "stdio" (server-side process), "sse", "streamable-http" (outbound HTTP).
+    #
+    # Migration note: if you previously used [features.mcp.sse], [features.mcp.stdio], or
+    # [features.mcp.streamable-http] sections, replace them with [[features.mcp.servers]] entries.
+    #
+    # [[features.mcp.servers]]
+    # name = "github"
+    # type = "stdio"
+    # command = "npx -y @modelcontextprotocol/server-github"
+    # # Optional: environment variables merged over the default subprocess
+    # # environment at spawn time. Never exposed to clients.
+    # env = {{ GITHUB_TOKEN = "..." }}
+    #
+    # [[features.mcp.servers]]
+    # name = "my-sse-server"
+    # type = "sse"
+    # url = "https://mcp.example.com/sse"
+    #
+    # [[features.mcp.servers]]
+    # name = "my-http-server"
+    # type = "streamable-http"
+    # url = "https://mcp.example.com/mcp"
+
+    [features.mcp.user_servers]
+        # Opt-in: allow end-users to connect their own SSE or streamable-http MCP servers.
+        # stdio is never user-provided (server-side config only).
+        enabled = false
+        # Allowlist of permitted URL prefixes. Empty list = deny all.
+        # Example: allowed_urls = ["https://mcp.example.com"]
+        allowed_urls = []
+
+[UI]
+# Name of the assistant.
+name = "Assistant"
+
+# default_theme = "dark"
+
+# Force a specific language for all users (e.g., "en-US", "he-IL", "fr-FR")
+# If not set, the browser's language will be used
+# language = "en-US"
+
+# layout = "wide"
+
+# default_sidebar_state = "open"  # Options: "open", "closed", "hidden"
+
+# Chat settings display location: "message_composer" (default) or "sidebar" (header)
+# chat_settings_location = "message_composer"
+
+# Default state of chat settings sidebar when location is "sidebar"
+# default_chat_settings_open = false
+
+# Whether to prompt user confirmation on clicking 'New Chat'
+confirm_new_chat = true
+
+# Description of the assistant. This is used for HTML tags.
+# description = ""
+
+# Chain of Thought (CoT) display mode. Can be "hidden", "tool_call" or "full".
+cot = "full"
+
+# Specify a CSS file that can be used to customize the user interface.
+# The CSS file can be served from the public directory or via an external link.
+# custom_css = "/public/test.css"
+
+# Specify additional attributes for a custom CSS file
+# custom_css_attributes = "media=\\\"print\\\""
+
+# Specify a JavaScript file that can be used to customize the user interface.
+# The JavaScript file can be served from the public directory.
+# custom_js = "/public/test.js"
+
+# The style of alert boxes. Can be "classic" or "modern".
+alert_style = "classic"
+
+# Specify additional attributes for custom JS file
+# custom_js_attributes = "async type = \\\"module\\\""
+
+# Custom login page image, relative to public directory or external URL
+# login_page_image = "/public/custom-background.jpg"
+
+# Custom login page image filter (Tailwind internal filters, no dark/light variants)
+# login_page_image_filter = "brightness-50 grayscale"
+# login_page_image_dark_filter = "contrast-200 blur-sm"
+
+# Specify a custom meta URL (used for meta tags like og:url)
+# custom_meta_url = "https://github.com/Chainlit/chainlit"
+
+# Specify a custom meta image url.
+# custom_meta_image_url = "https://chainlit-cloud.s3.eu-west-3.amazonaws.com/logo/chainlit_banner.png"
+
+# Load assistant logo directly from URL.
+logo_file_url = ""
+
+# Load assistant avatar image directly from URL.
+default_avatar_file_url = ""
+
+# Avatar size in pixels (default: 20).
+# avatar_size = 20
+
+# Specify a custom build directory for the frontend.
+# This can be used to customize the frontend code.
+# Be careful: If this is a relative path, it should not start with a slash.
+# custom_build = "./public/build"
+
+# Specify optional one or more custom links in the header.
+# [[UI.header_links]]
+#     name = "Issues"
+#     display_name = "Report Issue"
+#     icon_url = "https://avatars.githubusercontent.com/u/128686189?s=200&v=4"
+#     url = "https://github.com/Chainlit/chainlit/issues"
+#     target = "_blank" (default)  # Optional: "_self", "_parent", "_top".
+
+[meta]
+generated_by = "{__version__}"
+"""
+
+
+DEFAULT_HOST = "127.0.0.1"
+DEFAULT_PORT = 8000
+DEFAULT_ROOT_PATH = ""
+
+
+class RunSettings(BaseModel):
+    # Name of the module (python file) used in the run command
+    module_name: Optional[str] = None
+    host: str = DEFAULT_HOST
+    port: int = DEFAULT_PORT
+    ssl_cert: Optional[str] = None
+    ssl_key: Optional[str] = None
+    root_path: str = DEFAULT_ROOT_PATH
+    headless: bool = False
+    watch: bool = False
+    no_cache: bool = False
+    debug: bool = False
+    ci: bool = False
+
+
+class PaletteOptions(BaseModel):
+    main: Optional[str] = ""
+    light: Optional[str] = ""
+    dark: Optional[str] = ""
+
+
+class TextOptions(BaseModel):
+    primary: Optional[str] = ""
+    secondary: Optional[str] = ""
+
+
+class Palette(BaseModel):
+    primary: Optional[PaletteOptions] = None
+    background: Optional[str] = ""
+    paper: Optional[str] = ""
+    text: Optional[TextOptions] = None
+
+
+class SpontaneousFileUploadFeature(BaseModel):
+    enabled: Optional[bool] = None
+    accept: Optional[Union[List[str], Dict[str, List[str]]]] = None
+    max_files: Optional[int] = None
+    max_size_mb: Optional[int] = None
+
+
+class AudioFeature(BaseModel):
+    sample_rate: int = 24000
+    enabled: bool = False
+
+
+class SlackFeature(BaseModel):
+    reaction_on_message_received: bool = False
+
+
+class StdioMcpServer(BaseModel):
+    # `type` is the union discriminator and carries no default deliberately: a
+    # default is dropped by model_dump(exclude_unset=True), which leaves the
+    # tag missing and makes the server unresolvable when chat-profile
+    # config_overrides are merged.
+    name: str
+    type: Literal["stdio"]
+    command: str  # developer-controlled; trusted at config time
+    # Developer-controlled config, merged over the MCP SDK's default subprocess
+    # environment at spawn time. Never exposed to clients.
+    env: Optional[dict[str, str]] = None
+
+
+class SseMcpServer(BaseModel):
+    name: str
+    type: Literal["sse"]  # discriminator; see StdioMcpServer
+    url: str
+    headers: Optional[dict[str, str]] = None
+
+
+class StreamableHttpMcpServer(BaseModel):
+    name: str
+    type: Literal["streamable-http"]  # discriminator; see StdioMcpServer
+    url: str
+    headers: Optional[dict[str, str]] = None
+
+
+McpServerConfig = Annotated[
+    Union[StdioMcpServer, SseMcpServer, StreamableHttpMcpServer],
+    Field(discriminator="type"),
+]
+
+
+class McpUserServersFeature(BaseModel):
+    enabled: bool = False
+    allowed_urls: list[str] = []  # empty = deny all user-provided URLs
+
+
+class McpFeature(BaseModel):
+    enabled: bool = False
+    servers: list[McpServerConfig] = []
+    user_servers: McpUserServersFeature = Field(default_factory=McpUserServersFeature)
+
+    @model_validator(mode="after")
+    def _check_server_names(self) -> "McpFeature":
+        """Reject empty/whitespace-only server names, and names that collide
+        once normalised, so a second entry can't silently shadow the first.
+
+        `server.py`'s named-server lookup (`next(...)` over
+        `config.features.mcp.servers`) returns only the first exact-string
+        match, while `/project/settings` serialises *every* entry -- so a
+        duplicate name is dead config the user gets no warning about.
+        Normalised with `.strip().casefold()` to match the runtime collision
+        check in the `/mcp` handler exactly, so a near-miss (different case or
+        padding) can't alias a configured server either.
+
+        A `model_validator(mode="after")` -- rather than a raw-dict check next
+        to `_check_legacy_mcp_config` -- so this also fires when a chat
+        profile's `config_overrides` mutate `mcp.servers` via `with_overrides`,
+        which only re-validates the Pydantic models.
+        """
+        empty = [repr(s.name) for s in self.servers if not s.name.strip()]
+        if empty:
+            raise ValueError(
+                "MCP server name(s) "
+                f"{', '.join(empty)} in [[features.mcp.servers]] must not be "
+                "empty or whitespace-only."
+            )
+
+        seen: set[str] = set()
+        duplicates: List[str] = []
+        for s in self.servers:
+            key = s.name.strip().casefold()
+            if key in seen:
+                duplicates.append(s.name)
+            else:
+                seen.add(key)
+        if duplicates:
+            raise ValueError(
+                "Duplicate MCP server name(s) in [[features.mcp.servers]]: "
+                f"{', '.join(repr(d) for d in duplicates)}. Server names must "
+                "be unique (case-insensitive, ignoring surrounding "
+                "whitespace)."
+            )
+
+        return self
+
+
+class FeaturesSettings(BaseModel):
+    spontaneous_file_upload: Optional[SpontaneousFileUploadFeature] = None
+    audio: Optional[AudioFeature] = Field(default_factory=AudioFeature)
+    mcp: McpFeature = Field(default_factory=McpFeature)
+    slack: SlackFeature = Field(default_factory=SlackFeature)
+    latex: bool = False
+    user_message_markdown: bool = True
+    user_message_autoscroll: bool = True
+    assistant_message_autoscroll: bool = True
+    unsafe_allow_html: bool = False
+    auto_tag_thread: bool = True
+    edit_message: bool = True
+    allow_thread_sharing: bool = False
+    favorites: bool = False
+
+
+class HeaderLink(BaseModel):
+    name: str
+    icon_url: str
+    url: str
+    display_name: Optional[str] = None
+    target: Optional[Literal["_blank", "_self", "_parent", "_top"]] = None
+
+
+class UISettings(BaseModel):
+    name: str
+    description: str = ""
+    cot: Literal["hidden", "tool_call", "full"] = "full"
+    default_theme: Optional[Literal["light", "dark"]] = "dark"
+    language: Optional[str] = None
+    layout: Optional[Literal["default", "wide"]] = "default"
+    default_sidebar_state: Optional[Literal["open", "closed", "hidden"]] = "open"
+    chat_settings_location: Optional[Literal["message_composer", "sidebar"]] = (
+        "message_composer"
+    )
+    default_chat_settings_open: bool = False
+    confirm_new_chat: bool = True
+    github: Optional[str] = None
+    custom_css: Optional[str] = None
+    custom_css_attributes: Optional[str] = ""
+    custom_js: Optional[str] = None
+
+    alert_style: Optional[Literal["classic", "modern"]] = "classic"
+    custom_js_attributes: Optional[str] = "defer"
+    login_page_image: Optional[str] = None
+    login_page_image_filter: Optional[str] = None
+    login_page_image_dark_filter: Optional[str] = None
+
+    custom_meta_url: Optional[str] = None
+    custom_meta_image_url: Optional[str] = None
+    logo_file_url: Optional[str] = None
+    default_avatar_file_url: Optional[str] = None
+    avatar_size: Optional[int] = None
+    custom_build: Optional[str] = None
+    header_links: Optional[List[HeaderLink]] = None
+
+
+class CodeSettings(BaseModel):
+    # App action functions
+    action_callbacks: Dict[str, Callable[["Action"], Any]]
+
+    # Module object loaded from the module_name
+    module: Any = None
+
+    # App life cycle callbacks
+    on_app_startup: Optional[Callable[[], Union[None, Awaitable[None]]]] = None
+    on_app_shutdown: Optional[Callable[[], Union[None, Awaitable[None]]]] = None
+
+    # Session life cycle callbacks
+    on_logout: Optional[Callable[["Request", "Response"], Any]] = None
+    on_stop: Optional[Callable[[], Any]] = None
+    on_chat_start: Optional[Callable[[], Any]] = None
+    on_chat_end: Optional[Callable[[], Any]] = None
+    on_chat_resume: Optional[Callable[["ThreadDict"], Any]] = None
+    on_message: Optional[Callable[["Message"], Any]] = None
+    on_feedback: Optional[Callable[["Feedback"], Any]] = None
+    on_slack_reaction_added: Optional[Callable[[Dict[str, Any]], Any]] = None
+    on_audio_start: Optional[Callable[[], Any]] = None
+    on_audio_chunk: Optional[Callable[["InputAudioChunk"], Any]] = None
+    on_audio_end: Optional[Callable[[], Any]] = None
+    on_mcp_connect: Optional[Callable] = None
+    on_mcp_disconnect: Optional[Callable] = None
+    on_settings_edit: Optional[Callable[[Dict[str, Any]], Any]] = None
+    on_settings_update: Optional[Callable[[Dict[str, Any]], Any]] = None
+    set_chat_profiles: Optional[
+        Callable[[Optional["User"], Optional["str"]], Awaitable[List["ChatProfile"]]]
+    ] = None
+    set_starters: Optional[
+        Callable[[Optional["User"], Optional["str"]], Awaitable[List["Starter"]]]
+    ] = None
+    set_starter_categories: Optional[
+        Callable[
+            [Optional["User"], Optional["str"], Optional["str"]],
+            Awaitable[List["StarterCategory"]],
+        ]
+    ] = None
+    on_shared_thread_view: Optional[
+        Callable[["ThreadDict", Optional["User"]], Awaitable[bool]]
+    ] = None
+    # Auth callbacks
+    password_auth_callback: Optional[
+        Callable[[str, str], Awaitable[Optional["User"]]]
+    ] = None
+    header_auth_callback: Optional[Callable[[Headers], Awaitable[Optional["User"]]]] = (
+        None
+    )
+    oauth_callback: Optional[
+        Callable[[str, str, Dict[str, str], "User"], Awaitable[Optional["User"]]]
+    ] = None
+
+    # Helpers
+    on_window_message: Optional[Callable[[str], Any]] = None
+    author_rename: Optional[Callable[[str], Awaitable[str]]] = None
+    data_layer: Optional[Callable[[], BaseDataLayer]] = None
+
+
+class ProjectSettings(BaseModel):
+    allow_origins: List[str] = Field(default_factory=lambda: ["*"])
+    # Socket.io client transports option
+    transports: Optional[List[str]] = None
+    # List of environment variables to be provided by each user to use the app. If empty, no environment variables will be asked to the user.
+    user_env: Optional[List[str]] = None
+    # Path to the local langchain cache database
+    lc_cache_path: Optional[str] = None
+    # Path to the local chat db
+    # Duration (in seconds) during which the session is saved when the connection is lost
+    session_timeout: int = 300
+    # Duration (in seconds) of the user session expiry
+    user_session_timeout: int = 1296000  # 15 days
+    # Enable third parties caching (e.g LangChain cache)
+    cache: bool = False
+    # Whether to persist user environment variables (API keys) to the database
+    persist_user_env: Optional[bool] = False
+    # Whether to mask user environment variables (API keys) in the UI with password type
+    mask_user_env: Optional[bool] = False
+
+
+class ChainlitConfigOverrides(BaseModel):
+    """Configuration overrides that can be applied to specific chat profiles."""
+
+    ui: Optional[UISettings] = None
+    features: Optional[FeaturesSettings] = None
+    project: Optional[ProjectSettings] = None
+
+
+class ChainlitConfig(BaseSettings):
+    root: str = APP_ROOT
+    chainlit_server: str = Field(default="")
+    run: RunSettings = Field(default_factory=RunSettings)
+    features: FeaturesSettings
+    ui: UISettings
+    project: ProjectSettings
+    code: CodeSettings
+
+    def load_translation(self, language: str):
+        translation = {}
+        default_language = "en-US"
+        parent_language = language.split("-")[0]
+
+        translation_dir = Path(config_translation_dir)
+
+        # 1. Exact match (e.g. "da-DK.json" or "da.json")
+        translation_lib_file_path = translation_dir / f"{language}.json"
+        if (
+            is_path_inside(translation_lib_file_path, translation_dir)
+            and translation_lib_file_path.is_file()
+        ):
+            translation = json.loads(
+                translation_lib_file_path.read_text(encoding="utf-8")
+            )
+            return translation
+
+        # 2. Parent/base language fallback (e.g. "de-DE" → "de.json")
+        translation_lib_parent_language_file_path = (
+            translation_dir / f"{parent_language}.json"
+        )
+        if (
+            is_path_inside(translation_lib_parent_language_file_path, translation_dir)
+            and translation_lib_parent_language_file_path.is_file()
+        ):
+            logger.warning(
+                f"Translation file for {language} not found. Using parent translation {parent_language}."
+            )
+            translation = json.loads(
+                translation_lib_parent_language_file_path.read_text(encoding="utf-8")
+            )
+            return translation
+
+        # 3. Regional variant lookup (e.g. "da" → "da-DK.json")
+        if language == parent_language:
+            for candidate in sorted(translation_dir.glob(f"{parent_language}-*.json")):
+                if is_path_inside(candidate, translation_dir) and candidate.is_file():
+                    variant = candidate.stem
+                    logger.info(
+                        f"Translation file for {language} not found. Using regional variant {variant}."
+                    )
+                    translation = json.loads(candidate.read_text(encoding="utf-8"))
+                    return translation
+
+        # 4. Default fallback
+        default_translation_lib_file_path = translation_dir / f"{default_language}.json"
+        if (
+            is_path_inside(default_translation_lib_file_path, translation_dir)
+            and default_translation_lib_file_path.is_file()
+        ):
+            logger.warning(
+                f"Translation file for {language} not found. Using default translation {default_language}."
+            )
+            translation = json.loads(
+                default_translation_lib_file_path.read_text(encoding="utf-8")
+            )
+
+        return translation
+
+    def with_overrides(
+        self, overrides: "ChainlitConfigOverrides | None"
+    ) -> "ChainlitConfig":
+        base = self.model_dump()
+        patch = overrides.model_dump(exclude_unset=True) if overrides else {}
+
+        def _merge(a, b):
+            if isinstance(a, dict) and isinstance(b, dict):
+                out = dict(a)
+                for k, v in b.items():
+                    out[k] = _merge(out.get(k), v)
+                return out
+            return b
+
+        merged = _merge(base, patch) if patch else base
+        return type(self).model_validate(merged)
+
+
+def init_config(log: bool = False):
+    """Initialize the configuration file if it doesn't exist."""
+    if not os.path.exists(config_file):
+        os.makedirs(config_dir, exist_ok=True)
+        with open(config_file, "w", encoding="utf-8") as f:
+            f.write(DEFAULT_CONFIG_STR)
+            logger.info(f"Created default config file at {config_file}")
+    elif log:
+        logger.info(f"Config file already exists at {config_file}")
+
+    if not os.path.exists(config_translation_dir):
+        os.makedirs(config_translation_dir, exist_ok=True)
+        logger.info(
+            f"Created default translation directory at {config_translation_dir}"
+        )
+
+    for file in os.listdir(TRANSLATIONS_DIR):
+        if file.endswith(".json"):
+            dst = os.path.join(config_translation_dir, file)
+            if not os.path.exists(dst):
+                src = os.path.join(TRANSLATIONS_DIR, file)
+                with open(src, encoding="utf-8") as f:
+                    translation = json.load(f)
+                    with open(dst, "w", encoding="utf-8") as f:
+                        json.dump(translation, f, indent=4)
+                        logger.info(f"Created default translation file at {dst}")
+
+
+def load_module(target: str, force_refresh: bool = False):
+    """Load the specified module."""
+
+    # Get the target's directory
+    target_dir = os.path.dirname(os.path.abspath(target))
+
+    # Add the target's directory to the Python path
+    sys.path.insert(0, target_dir)
+
+    if force_refresh:
+        # Get current site packages dirs
+        site_package_dirs = site.getsitepackages()
+
+        # Clear the modules related to the app from sys.modules
+        for module_name, module in list(sys.modules.items()):
+            if (
+                hasattr(module, "__file__")
+                and module.__file__
+                and module.__file__.startswith(target_dir)
+                and not any(module.__file__.startswith(p) for p in site_package_dirs)
+            ):
+                sys.modules.pop(module_name, None)
+
+    spec = util.spec_from_file_location(target, target)
+    if not spec or not spec.loader:
+        sys.path.pop(0)
+        return
+
+    module = util.module_from_spec(spec)
+    if not module:
+        sys.path.pop(0)
+        return
+
+    spec.loader.exec_module(module)
+
+    sys.modules[target] = module
+
+    # Remove the target's directory from the Python path
+    sys.path.pop(0)
+
+
+# Legacy (pre-2.12.0) per-transport MCP sections. These were replaced by a
+# unified `[[features.mcp.servers]]` array plus `[features.mcp.user_servers]`.
+# Note: `streamable-http` contains a hyphen, so tomli parses it into the dict
+# under the literal key "streamable-http" (not an attribute-style name).
+_LEGACY_MCP_TRANSPORT_KEYS = ("sse", "stdio", "streamable-http")
+
+
+def _check_legacy_mcp_config(features_settings: Dict[str, Any]) -> None:
+    """Fail loudly if the config file still uses the pre-2.12.0 MCP schema
+    AND MCP is actually enabled.
+
+    Pydantic's default `extra="ignore"` behavior means legacy keys like
+    `[features.mcp.sse]` or `allowed_executables` would otherwise be silently
+    dropped: the app would boot, `features.mcp.enabled` would stay true, but
+    `servers` would be empty and the frontend would hide the MCP button
+    entirely -- with no error and no log line. We check the raw TOML dict
+    (before Pydantic parsing discards the unknown keys) so we can name the
+    exact offending key(s) and tell the user how to fix it.
+
+    The pre-2.12.0 default config template (generated by every Chainlit app
+    that never touched its MCP settings) ships all of these legacy sections
+    with `features.mcp.enabled = false`. For that overwhelming majority of
+    deployments the legacy keys are inert leftovers, not a broken MCP setup,
+    so we only raise when `features.mcp.enabled` is truthy in the raw TOML.
+    A missing `enabled` key is treated as false, matching the schema default.
+    """
+    mcp_settings = features_settings.get("mcp")
+    if not isinstance(mcp_settings, dict):
+        return
+
+    if not mcp_settings.get("enabled", False):
+        if any(key in mcp_settings for key in _LEGACY_MCP_TRANSPORT_KEYS):
+            # Not fatal — MCP is off, so nothing is broken. Logged because this
+            # check only runs once against the on-disk config: a chat profile's
+            # `config_overrides` can turn MCP on afterwards, and it would then
+            # start with no servers and no other clue why.
+            logger.warning(
+                "Ignoring pre-2.12.0 MCP config sections in %s because "
+                "features.mcp.enabled is false. Remove them, or migrate to "
+                "[[features.mcp.servers]] before enabling MCP.",
+                config_file,
+            )
+        return
+
+    found_keys: List[str] = [
+        f"[features.mcp.{key}]"
+        for key in _LEGACY_MCP_TRANSPORT_KEYS
+        if key in mcp_settings
+    ]
+
+    # `allowed_executables` really lived under [features.mcp.stdio], but accept
+    # it at either level so a partially-migrated config is still named exactly.
+    if "allowed_executables" in mcp_settings:
+        found_keys.append("features.mcp.allowed_executables")
+    for key in _LEGACY_MCP_TRANSPORT_KEYS:
+        section = mcp_settings.get(key)
+        if isinstance(section, dict) and "allowed_executables" in section:
+            found_keys.append(f"features.mcp.{key}.allowed_executables")
+
+    if not found_keys:
+        return
+
+    raise ValueError(
+        "The MCP config schema changed in Chainlit 2.12.0 and your config file "
+        f"'{config_file}' still uses the legacy format. The app will NOT start "
+        "until this is migrated.\n\n"
+        f"Legacy key(s) found: {', '.join(found_keys)}\n\n"
+        "Replace the old per-transport sections with a list of servers, e.g.:\n\n"
+        "[features.mcp]\n"
+        "enabled = true\n\n"
+        "[[features.mcp.servers]]\n"
+        'name = "github"\n'
+        'type = "stdio"  # or "sse" / "streamable-http"\n'
+        'command = "npx -y @modelcontextprotocol/server-github"\n\n'
+        "# Optional: allow end-users to connect their own SSE/HTTP servers\n"
+        "[features.mcp.user_servers]\n"
+        "enabled = false\n"
+        "allowed_urls = []\n\n"
+        "See the full migration guide in CHANGELOG.md "
+        "('Migration guide (MCP config)') and docs/security-advisory-2026-mcp.md."
+    )
+
+
+def load_settings():
+    with open(config_file, "rb") as f:
+        toml_dict = tomli.load(f)
+        # Load project settings
+        project_config = toml_dict.get("project", {})
+        features_settings = toml_dict.get("features", {})
+        ui_settings = toml_dict.get("UI", {})
+        meta = toml_dict.get("meta")
+
+        if not meta or meta.get("generated_by") <= "0.3.0":
+            raise ValueError(
+                f"Your config file '{config_file}' is outdated. Please delete it and restart the app to regenerate it."
+            )
+
+        _check_legacy_mcp_config(features_settings)
+
+        lc_cache_path = os.path.join(config_dir, ".langchain.db")
+
+        project_settings = ProjectSettings(
+            lc_cache_path=lc_cache_path,
+            **project_config,
+        )
+
+        features_settings = FeaturesSettings(**features_settings)
+
+        ui_settings = UISettings(**ui_settings)
+
+        code_settings = CodeSettings(action_callbacks={})
+
+        return {
+            "features": features_settings,
+            "ui": ui_settings,
+            "project": project_settings,
+            "code": code_settings,
+        }
+
+
+def reload_config():
+    """Reload the configuration from the config file."""
+    global config
+    if config is None:
+        return
+
+    # Preserve the module_name during config reload to ensure hot reload works
+    original_module_name = config.run.module_name if config.run else None
+
+    new_cfg = ChainlitConfig(**load_settings())
+    config.root = new_cfg.root
+    config.chainlit_server = new_cfg.chainlit_server
+    config.run = new_cfg.run
+    config.features = new_cfg.features
+    config.ui = new_cfg.ui
+
+    # Restore the preserved module_name
+    if original_module_name and config.run:
+        config.run.module_name = original_module_name
+    config.project = new_cfg.project
+    config.code = new_cfg.code
+
+
+def load_config():
+    """Load the configuration from the config file."""
+    init_config()
+    settings = load_settings()
+    return ChainlitConfig(**settings)
+
+
+def lint_translations():
+    # Load the ground truth (en-US.json file from chainlit source code)
+    src = os.path.join(TRANSLATIONS_DIR, "en-US.json")
+    with open(src, encoding="utf-8") as f:
+        truth = json.load(f)
+
+        # Find the local app translations
+        for file in os.listdir(config_translation_dir):
+            if file.endswith(".json"):
+                # Load the translation file
+                to_lint = os.path.join(config_translation_dir, file)
+                with open(to_lint, encoding="utf-8") as f2:
+                    translation = json.load(f2)
+
+                    # Lint the translation file
+                    lint_translation_json(file, truth, translation)
+
+
+config = load_config()

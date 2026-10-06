@@ -1,0 +1,2 @@
+[opentelemetry_instrumentor]
+transformers = opentelemetry.instrumentation.transformers:TransformersInstrumentor

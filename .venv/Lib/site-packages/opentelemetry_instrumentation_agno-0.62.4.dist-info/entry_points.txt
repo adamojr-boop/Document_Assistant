@@ -1,0 +1,2 @@
+[opentelemetry_instrumentor]
+agno = opentelemetry.instrumentation.agno:AgnoInstrumentor

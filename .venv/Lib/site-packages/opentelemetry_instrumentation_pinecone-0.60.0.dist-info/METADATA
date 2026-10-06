@@ -1,0 +1,37 @@
+Metadata-Version: 2.4
+Name: opentelemetry-instrumentation-pinecone
+Version: 0.60.0
+Summary: OpenTelemetry Pinecone instrumentation
+Project-URL: Repository, https://github.com/traceloop/openllmetry/tree/main/packages/opentelemetry-instrumentation-pinecone
+Author-email: Gal Kleinman <gal@traceloop.com>, Nir Gazit <nir@traceloop.com>, Tomer Friedman <tomer@traceloop.com>
+License-Expression: Apache-2.0
+Requires-Python: <4,>=3.10
+Requires-Dist: opentelemetry-api<2,>=1.38.0
+Requires-Dist: opentelemetry-instrumentation>=0.59b0
+Requires-Dist: opentelemetry-semantic-conventions-ai<0.6.0,>=0.5.1
+Requires-Dist: opentelemetry-semantic-conventions>=0.59b0
+Provides-Extra: instruments
+Requires-Dist: pinecone<9,>=5.1.0; extra == 'instruments'
+Description-Content-Type: text/markdown
+
+# OpenTelemetry Pinecone Instrumentation
+
+<a href="https://pypi.org/project/opentelemetry-instrumentation-pinecone/">
+    <img src="https://badge.fury.io/py/opentelemetry-instrumentation-pinecone.svg">
+</a>
+
+This library allows tracing client-side calls to Pinecone vector DB sent with the official [Pinecone library](https://github.com/pinecone-io/pinecone-python-client).
+
+## Installation
+
+```bash
+pip install opentelemetry-instrumentation-pinecone
+```
+
+## Example usage
+
+```python
+from opentelemetry.instrumentation.pinecone import PineconeInstrumentor
+
+PineconeInstrumentor().instrument()
+```

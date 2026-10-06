@@ -1,0 +1,2 @@
+[opentelemetry_instrumentor]
+replicate = opentelemetry.instrumentation.replicate:ReplicateInstrumentor

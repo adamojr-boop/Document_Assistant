@@ -1,0 +1,2 @@
+[opentelemetry_instrumentor]
+llama-index = opentelemetry.instrumentation.llamaindex:LlamaIndexInstrumentor

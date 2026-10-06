@@ -1,0 +1,2 @@
+[opentelemetry_instrumentor]
+aleph_alpha_client = opentelemetry.instrumentation.alephalpha:AlephAlphaInstrumentor

@@ -1,0 +1,2 @@
+[opentelemetry_instrumentor]
+writer = opentelemetry.instrumentation.writer:WriterInstrumentor

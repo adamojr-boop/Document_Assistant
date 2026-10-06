@@ -1,0 +1,2 @@
+[opentelemetry_instrumentor]
+anthropic = opentelemetry.instrumentation.anthropic:AnthropicInstrumentor

@@ -1,0 +1,2 @@
+[opentelemetry_instrumentor]
+mistralai = opentelemetry.instrumentation.mistralai:MistralAiInstrumentor

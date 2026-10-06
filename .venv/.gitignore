@@ -1,0 +1,16 @@
+# Ambiente virtuale
+.venv/
+venv/
+ENV/
+
+# Variabili d'ambiente e chiavi
+.env
+
+# Cache di Python e OS
+__pycache__/
+*.pyc
+.DS_Store
+
+# Database vettoriali locali o cache di Chainlit
+.chainlit/
+chroma_db/
