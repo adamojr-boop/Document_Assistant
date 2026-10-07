@@ -1,5 +1,7 @@
 import os
 import shutil
+import json
+from datetime import datetime
 from pathlib import Path
 import chainlit as cl
 from chainlit.action import Action
@@ -11,6 +13,30 @@ db = Database()
 processor = DocumentProcessor(db)
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+# Percorso per il salvataggio dei log di feedback (diagnostica RAG)
+FEEDBACK_LOG_FILE = Path("feedback_logs.json")
+
+def log_feedback_to_disk(user_query: str, context: str, answer: str, rating: str):
+    """Salva la telemetria del feedback su file JSON per future analisi e miglioramenti."""
+    log_entry = {
+        "timestamp": datetime.now().isoformat(),
+        "rating": rating,
+        "query": user_query,
+        "context_retrieved": context,
+        "assistant_answer": answer
+    }
+    logs = []
+    if FEEDBACK_LOG_FILE.exists():
+        try:
+            with open(FEEDBACK_LOG_FILE, "r", encoding="utf-8") as f:
+                logs = json.load(f)
+        except Exception:
+            logs = []
+    logs.append(log_entry)
+    with open(FEEDBACK_LOG_FILE, "w", encoding="utf-8") as f:
+        json.dump(logs, f, ensure_ascii=False, indent=4)
+
 
 @cl.on_chat_start
 async def start():
@@ -44,11 +70,13 @@ async def start():
         ),
     ]
     
+    # Messaggio di benvenuto gestito dall'amministratore di sistema
     await cl.Message(
         content="Benvenuto nel tuo **Travel Assistant** ✈️! Gestisci i documenti turistici regionali o chiedimi informazioni sulle mete. Puoi anche caricare nuovi file direttamente qui in chat!", 
         actions=actions,
         author="system_assistant"
     ).send()
+
 
 @cl.action_callback("db_stats")
 async def on_db_stats(action: Action):
@@ -59,6 +87,7 @@ async def on_db_stats(action: Action):
         author="system_assistant"
     ).send()
 
+
 @cl.action_callback("db_reindex")
 async def on_db_reindex(action: Action):
     processor.sync_documents()
@@ -66,6 +95,7 @@ async def on_db_reindex(action: Action):
         content="🔄 **Reindex completato:** Le cartelle regionali sono state sincronizzate con successo.",
         author="system_assistant"
     ).send()
+
 
 @cl.action_callback("db_clear")
 async def on_db_clear(action: Action):
@@ -75,9 +105,10 @@ async def on_db_clear(action: Action):
         author="system_assistant"
     ).send()
 
+
 @cl.on_message
 async def main(message: cl.Message):
-    # 1. Gestione dei file allegati direttamente dall'interfaccia di Chainlit
+    # 1. AGENTE DI SISTEMA: Gestione dei file allegati direttamente dall'interfaccia
     if message.elements:
         uploaded_files_count = 0
         for element in message.elements:
@@ -94,7 +125,7 @@ async def main(message: cl.Message):
             ).send()
             return
 
-    # 2. Gestione della normale richiesta RAG
+    # 2. AGENTE DI VIAGGIO (TRAVEL ASSISTANT): Elaborazione della richiesta RAG
     msg = cl.Message(
         content="Sto cercando nei documenti di viaggio...",
         author="travel_assistant"
@@ -104,7 +135,7 @@ async def main(message: cl.Message):
     user_query = message.content
     collection = db.get_collection()
 
-    # Eseguiamo la ricerca semantica su ChromaDB con i 12 chunk
+    # Ricerca semantica su ChromaDB con i 12 chunk
     results = collection.query(
         query_texts=[user_query],
         n_results=12
@@ -140,7 +171,14 @@ Domanda dell'utente: {user_query}
     msg.content = answer
     msg.author = "travel_assistant"
 
-    # 3. Aggiungiamo i pulsanti di feedback (👍 / 👎) sotto la risposta
+    # Salviamo temporaneamente i dati nel messaggio per abbinarli al feedback dell'utente
+    msg.metadata = {
+        "user_query": user_query,
+        "context": context,
+        "answer": answer
+    }
+
+    # Pulsanti di feedback sotto la risposta dell'esperto
     feedback_actions = [
         Action(name="feedback_up", icon="thumbs-up", label="Utile", value="up", payload={}),
         Action(name="feedback_down", icon="thumbs-down", label="Non utile", value="down", payload={})
@@ -148,10 +186,35 @@ Domanda dell'utente: {user_query}
     msg.actions = feedback_actions
     await msg.update()
 
+
 @cl.action_callback("feedback_up")
 async def on_feedback_up(action: Action):
-    await cl.Message(content="👍 Grazie per il tuo feedback positivo!", author="system_assistant").send()
+    # Recuperiamo il messaggio precedente per estrarre la telemetria
+    msg = action.for_message
+    if msg and hasattr(msg, "metadata") and msg.metadata:
+        log_feedback_to_disk(
+            user_query=msg.metadata.get("user_query"),
+            context=msg.metadata.get("context"),
+            answer=msg.metadata.get("answer"),
+            rating="up"
+        )
+    await cl.Message(
+        content="👍 Grazie per il tuo feedback positivo! Traccia salvata nei log di sistema.", 
+        author="system_assistant"
+    ).send()
+
 
 @cl.action_callback("feedback_down")
 async def on_feedback_down(action: Action):
-    await cl.Message(content="👎 Grazie per il feedback. Faremo tesoro della segnalazione per migliorare le risposte.", author="system_assistant").send()
+    msg = action.for_message
+    if msg and hasattr(msg, "metadata") and msg.metadata:
+        log_feedback_to_disk(
+            user_query=msg.metadata.get("user_query"),
+            context=msg.metadata.get("context"),
+            answer=msg.metadata.get("answer"),
+            rating="down"
+        )
+    await cl.Message(
+        content="👎 Grazie per il feedback. La traccia è stata registrata per consentirti di analizzare e correggere i punti deboli.", 
+        author="system_assistant"
+    ).send()
