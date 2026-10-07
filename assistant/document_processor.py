@@ -1,9 +1,11 @@
 import os
 import hashlib
+import re
+import numpy as np
 from pathlib import Path
+from openai import OpenAI
 from markitdown import MarkItDown
 
-# Puntiamo alla cartella data/italia alla radice del progetto (salendo di un livello da app/)
 CURRENT_DIR = Path(__file__).resolve().parent
 ITALIA_DIR = CURRENT_DIR.parent / "data" / "italia"
 
@@ -19,6 +21,8 @@ class DocumentProcessor:
     def __init__(self, db):
         self.collection = db.get_collection()
         self.md_converter = MarkItDown()
+        # Inizializziamo il client OpenAI per generare gli embeddings semantici
+        self.openai_client = OpenAI()
 
     @staticmethod
     def get_document_metadata(file_path: str, file_hash: str) -> dict:
@@ -28,8 +32,69 @@ class DocumentProcessor:
             "file_hash": file_hash
         }
 
+    def semantic_chunk_text(self, text: str, threshold_percentile=85, max_chunk_size=1200) -> list[str]:
+        """Divide il testo in chunk basandosi sulla distanza semantica tra le frasi."""
+        # 1. Pulizia e suddivisione in frasi
+        clean_text = text.replace("\n", " ")
+        sentences = re.split(r'(?<=[.!?])\s+', clean_text)
+        sentences = [s.strip() for s in sentences if s.strip()]
+        
+        if not sentences:
+            return [text] if text.strip() else []
+            
+        if len(sentences) == 1:
+            return sentences
+
+        try:
+            # 2. Generazione degli embeddings per ogni frase tramite OpenAI
+            response = self.openai_client.embeddings.create(
+                input=sentences,
+                model="text-embedding-3-small"
+            )
+            embeddings = [item.embedding for item in response.data]
+            
+            # 3. Calcolo della distanza di coseno tra frasi adiacenti
+            def cosine_similarity(a, b):
+                return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
+                
+            distances = []
+            for i in range(len(embeddings) - 1):
+                sim = cosine_similarity(embeddings[i], embeddings[i+1])
+                distances.append(1.0 - sim) # Distanza = 1 - similarità
+                
+            if not distances:
+                return [text]
+                
+            # 4. Soglia dinamica basata sul percentile delle distanze
+            threshold = np.percentile(distances, threshold_percentile)
+            
+            chunks = []
+            current_chunk = [sentences[0]]
+            current_length = len(sentences[0])
+            
+            for i, dist in enumerate(distances):
+                next_sentence = sentences[i+1]
+                # Spezziamo se la distanza supera la soglia o se superiamo la dimensione massima del chunk
+                if dist > threshold or (current_length + len(next_sentence) > max_chunk_size):
+                    chunks.append(" ".join(current_chunk))
+                    current_chunk = [next_sentence]
+                    current_length = len(next_sentence)
+                else:
+                    current_chunk.append(next_sentence)
+                    current_length += len(next_sentence) + 1
+                    
+            if current_chunk:
+                chunks.append(" ".join(current_chunk))
+                
+            return chunks
+            
+        except Exception as e:
+            print(f"[WARNING] Errore nel chunking semantico ({e}), fallback al chunking a dimensione fissa.")
+            chunk_size = 1000
+            return [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
+
     def sync_documents(self):
-        """Sincronizza la cartella data/italia/ con ChromaDB."""
+        """Sincronizza la cartella data/italia/ con ChromaDB usando il chunking semantico."""
         print(f"\n[DEBUG] Controllo cartella italia in corso...")
         print(f"[DEBUG] Percorso assoluto cercato: {ITALIA_DIR.resolve()}")
         
@@ -38,7 +103,7 @@ class DocumentProcessor:
             ITALIA_DIR.mkdir(parents=True, exist_ok=True)
             return
 
-        supported_extensions = {".txt", ".pdf", ".docx", ".pptx", ".xlsx"}
+        supported_extensions = {".txt", ".pdf", ".docx", ".pptx", ".xlsx", ""}
         
         local_files = {
             f.name: f for f in ITALIA_DIR.iterdir() 
@@ -86,16 +151,17 @@ class DocumentProcessor:
             file_path = local_files[filename]
             current_hash = calculate_file_hash(file_path)
             
-            if file_path.suffix.lower() == ".txt":
+            if file_path.suffix.lower() == ".txt" or file_path.suffix == "":
                 with open(file_path, "r", encoding="utf-8") as f:
                     content = f.read()
             else:
                 result = self.md_converter.convert(str(file_path))
                 content = result.text_content
 
-            chunk_size = 1000
-            chunks = [content[i:i+chunk_size] for i in range(0, len(content), chunk_size)]
-            print(f"[DEBUG] File '{filename}' suddiviso in {len(chunks)} chunk.")
+            # Applicazione del chunking semantico intelligente
+            print(f"[DEBUG] Analisi semantica e chunking per il file '{filename}'...")
+            chunks = self.semantic_chunk_text(content)
+            print(f"[DEBUG] File '{filename}' suddiviso in {len(chunks)} chunk semantici.")
 
             documents = []
             ids = []
@@ -114,4 +180,4 @@ class DocumentProcessor:
                     ids=ids,
                     metadatas=metadatas
                 )
-                print(f"[DEBUG] Salvati con successo {len(documents)} chunk per il file '{filename}'.\n")
+                print(f"[DEBUG] Salvati con successo {len(documents)} chunk semantici per il file '{filename}'.\n")
