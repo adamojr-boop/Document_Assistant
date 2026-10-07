@@ -1,10 +1,11 @@
 import os
 import shutil
+from pathlib import Path
 import chainlit as cl
 from chainlit.action import Action
 from openai import OpenAI
 from assistant.database import Database
-from assistant.document_processor import DocumentProcessor
+from assistant.document_processor import DocumentProcessor, ITALIA_DIR
 
 db = Database()
 processor = DocumentProcessor(db)
@@ -44,7 +45,7 @@ async def start():
     ]
     
     await cl.Message(
-        content="Benvenuto nel tuo **Travel Assistant** ✈️! Gestisci i documenti turistici regionali o chiedimi informazioni sulle mete.", 
+        content="Benvenuto nel tuo **Travel Assistant** ✈️! Gestisci i documenti turistici regionali o chiedimi informazioni sulle mete. Puoi anche caricare nuovi file direttamente qui in chat!", 
         actions=actions,
         author="system_assistant"
     ).send()
@@ -76,6 +77,24 @@ async def on_db_clear(action: Action):
 
 @cl.on_message
 async def main(message: cl.Message):
+    # 1. Gestione dei file allegati direttamente dall'interfaccia di Chainlit
+    if message.elements:
+        uploaded_files_count = 0
+        for element in message.elements:
+            if element.mime and element.path:
+                dest_path = ITALIA_DIR / element.name
+                shutil.copy(element.path, dest_path)
+                uploaded_files_count += 1
+        
+        if uploaded_files_count > 0:
+            processor.sync_documents()
+            await cl.Message(
+                content=f"📁 Ho ricevuto e caricato con successo `{uploaded_files_count}` nuovo/i file! Il database è stato aggiornato e indicizzato.",
+                author="system_assistant"
+            ).send()
+            return
+
+    # 2. Gestione della normale richiesta RAG
     msg = cl.Message(
         content="Sto cercando nei documenti di viaggio...",
         author="travel_assistant"
@@ -120,4 +139,19 @@ Domanda dell'utente: {user_query}
     answer = response.choices[0].message.content
     msg.content = answer
     msg.author = "travel_assistant"
+
+    # 3. Aggiungiamo i pulsanti di feedback (👍 / 👎) sotto la risposta
+    feedback_actions = [
+        Action(name="feedback_up", icon="thumbs-up", label="Utile", value="up", payload={}),
+        Action(name="feedback_down", icon="thumbs-down", label="Non utile", value="down", payload={})
+    ]
+    msg.actions = feedback_actions
     await msg.update()
+
+@cl.action_callback("feedback_up")
+async def on_feedback_up(action: Action):
+    await cl.Message(content="👍 Grazie per il tuo feedback positivo!", author="system_assistant").send()
+
+@cl.action_callback("feedback_down")
+async def on_feedback_down(action: Action):
+    await cl.Message(content="👎 Grazie per il feedback. Faremo tesoro della segnalazione per migliorare le risposte.", author="system_assistant").send()
